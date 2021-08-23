@@ -1,5 +1,5 @@
-# School closures reduced social mixing of children during COVID-19 with implications for transmission risk and school reopening policies
-Analysis of school closure and reopening policies in COVID-19 outcomes in the Bay Area (California)
+# Model-based assessment of SARS-CoV-2 Delta variant transmission dynamics within partially vaccinated K-12 school populations
+Analysis of school closure and reopening policies in COVID-19 outcomes in the Bay Area (California) among partially vaccinated populations 
 # Documentation
 
 ## Introduction
