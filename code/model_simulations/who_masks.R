@@ -48,23 +48,23 @@ NWork <- round((N/2)/20,0) #number of work places (avg size = 20)
 library(here)
 here() #check for correct working directory
 
-source("..//functions//contact_matrix_VM.R") #make contact matrices
-source("..//functions//model_functions_VM.R")
+source(".//code//functions//contact_matrix_VM.R") #make contact matrices
+source(".//code//functions//model_functions_VM.R")
 
 #Load starting values -- list of fates, synthetic population, and starting states
-load("..//starting_states//fate_1000reps.RData") #fates -- fate_list
-load("..//starting_states//starting_states_1000reps.RData") #starting conditions -- start_state_list
-load("..//starting_states//synth_pops_1000reps.RData") #synthetic pop -- synth_pop_list
+load(".//code//starting_states//fate_1000reps.RData") #fates -- fate_list
+load(".//code//starting_states//starting_states_1000reps.RData") #starting conditions -- start_state_list
+load(".//code//starting_states//synth_pops_1000reps.RData") #synthetic pop -- synth_pop_list
 
 #Load the community matrices for the third wave of the survey
-load("..//..//data//survey_contact_data_Feb//FebComMatrix_med.RData")
-load("..//..//data//survey_contact_data_Feb//workFeb.RData")
+load(".//data//survey_contact_data_Feb//FebComMatrix_med.RData")
+load(".//data//survey_contact_data_Feb//workFeb.RData")
 
 #Calculate the observed community contact matrix in February
 Obs.comm_feb <- FebComMatrix_med - array_work_feb #subtract work because work gets added back in in the work matrix
 
 #Load the polymod data for the early epidemic period
-polymod_dat <- readRDS("..//..//data//POLYMOD_contact_data//polymod_dat.RData")
+polymod_dat <- readRDS(".//data//POLYMOD_contact_data//polymod_dat.RData")
 matrix <- as.matrix(polymod_dat$matrix)
 
 ######################################################################
