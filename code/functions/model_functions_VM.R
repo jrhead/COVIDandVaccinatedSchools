@@ -8,12 +8,16 @@
 #  5. modelled_outcomes: counts/summarizes important outcomes (e.g. cumulative infections, daily hospitalizations)
 ##
 
+########################## 
+#Last modified: 9/30/2021#
+########################## 
+
 # Function to updates fates of individuals
 
 update_fates <- function(N, #Number of people in population
-                         fate_i, #starting vector of fates
                          state0, #vector of starting states
-                         synth_pop_df, # dataframe of synthetic population
+                         fate_pre_vacc, #vector of starting fates, pre-vaccination
+                         synth_pop_df, #dataframe for synthetic pop
                          R0_init, #Transmission rate, AKA proportion of susceptible-infected contacts result in a new exposure (AGE DEPENDENT)
                          MAXEIG, #dominant eigenvalue of initial contact matrix
                          alpha,#prop of transmission from sub clinical infection
@@ -28,27 +32,49 @@ update_fates <- function(N, #Number of people in population
                          mu
 ){
   ## 1. Determine initial states --grabbed from input (state0)
-    
-  ## 2. Determine fate of individual should they become exposed (A = Asymptomatic, C = infected, recover,
-  #  H = hospitalized, recover, D = hospitalized, die)
   
-  #Draw random number per respondent to decide fate
-  A_prob <- 1-rho
-  C_prob <- rho*(1-h_rate)
-  H_prob <- rho*h_rate*(1-mu)
-  D_prob <- rho*h_rate*mu
-  
-  #grab fate from list
-  fate <- fate_i
-  
-  ## 3. Define waiting times for each person, should they fall into specific fates
+  ## 2. Define waiting times for each person, should they fall into specific fates
   
   waitEI <- rweibull(N, shapeEI, scaleEI)
   waitIR <- rweibull(N, shapeIR, scaleIR)
   waitIH <- rweibull(N, shapeIH, scaleIH)
   waitHRD <- rweibull(N, shapeHRD, scaleHRD)
   
-  #define waiting times based on fate
+  ## 3. Calculate beta
+
+  pA <- sum(fate_pre_vacc == "A")/N; gamma1 <- mean(waitIR)
+  pC <- sum(fate_pre_vacc == "C")/N; gamma2 <- mean(waitIR)
+  pH <- sum(fate_pre_vacc == "H")/N; gamma3 <- mean(waitIH)
+  pD <- sum(fate_pre_vacc == "D")/N; gamma4 <- mean(waitIH)
+  
+  # Formula for \bar{beta}
+  beta0 <- R0_init/(pA*alpha*gamma1 + pC*gamma2 + pH*gamma3 + pD*gamma4)
+  meanBeta <- beta0/MAXEIG
+  
+  # Adjust beta by suceptibility ratios
+  p_young <- sum(synth_pop_df$Age < susceptAgeSplit)/N
+  p_old <- sum(synth_pop_df$Age >= susceptAgeSplit)/N
+  beta_old <- meanBeta/(p_old + susceptRatio*p_young)
+  beta_young <- susceptRatio*beta_old
+  beta <- rep(beta_old,N)
+  beta[synth_pop_df$Age < susceptAgeSplit] <- beta_young
+  
+  ## 4. Update fates of individual should they become exposed (A = Asymptomatic, C = infected, recover,
+  #  H = hospitalized, recover, D = hospitalized, die)
+  
+  fate <- rep(NA,N)
+  A_prob <- 1-rho
+  C_prob <- rho*(1-h_rate)
+  H_prob <- rho*h_rate*(1-mu)
+  D_prob <- rho*h_rate*mu
+  
+  #Draw random number per respondent to decide fate
+  Rand <- runif(N, min = 0, max = 1)
+  fate <- ifelse(Rand <= A_prob, "A",
+                 ifelse(Rand > A_prob & Rand <= (A_prob + C_prob), "C",
+                        ifelse(Rand > (A_prob + C_prob) & Rand <= (A_prob + C_prob + H_prob), "H", "D")))
+  
+  ## 5. define waiting times based on fate
   time_state1 <- time_state2 <- time_state3 <- waitEI #initialize time to next state
   time_state2[fate == "A"|fate == "C"] <- waitEI[fate == "A"|fate == "C"] + waitIR[fate == "A"|fate == "C"]
   time_state2[fate == "H" | fate == "D"] <- waitEI[fate == "H" | fate == "D"] + waitIH[fate == "H" | fate == "D"]
@@ -63,26 +89,10 @@ update_fates <- function(N, #Number of people in population
   time_next_state2[state == "E"] <- 1 + time_state2[state == "E"]
   time_next_state3[state == "E"] <- 1 + time_state3[state == "E"]
   
-  ## 4. Calculate beta
-  pA <- sum(fate == "A")/N; gamma1 <- mean(waitIR)
-  pC <- sum(fate == "C")/N; gamma2 <- mean(waitIR)
-  pH <- sum(fate == "H")/N; gamma3 <- mean(waitIH)
-  pD <- sum(fate == "D")/N; gamma4 <- mean(waitIH)
-  
-  # Formula for \bar{beta}
-  beta0 <- R0_init/(pA*alpha*gamma1 + pC*gamma2 + pH*gamma3 + pD*gamma4)
-  meanBeta <- beta0/MAXEIG
-  
-  # Adjust beta by suceptibility ratios
-  p_young <- sum(synth_pop_df$Age < susceptAgeSplit)/N
-  p_old <- sum(synth_pop_df$Age >= susceptAgeSplit)/N
-  beta_old <- meanBeta/(p_old + susceptRatio*p_young)
-  beta_young <- susceptRatio*beta_old
-  beta <- rep(beta_old,N)
-  beta[synth_pop_df$Age < susceptAgeSplit] <- beta_young
-  
+
   ## 5. Return elements needed for SEIR
   out <- list("beta" = beta, 
+              "fate_updated" = fate,
               "time_state1" = time_state1,
               "time_state2" = time_state2,
               "time_state3" = time_state3,
@@ -135,6 +145,7 @@ SEIRQ_func <- function(synth_pop_df, #synthetic population
                       fate, #Vector of pre-determined individual fates, if they got sick
                       state_full, #an N x day matrix of states
                       state, #a N x 1 vector of current state
+                      VE, #an N x 1 vector of the vaccine effectiveness ( = 0 if person is not vaccinated)
                       quarantine_cases, #a vector indicating whether cases are being quarantined on that day
                       propComplyCase, #proportion of cases that comply with quarantine intervention
                       propComplyHH, #proportion of household members that also isolate
@@ -221,9 +232,9 @@ SEIRQ_func <- function(synth_pop_df, #synthetic population
       contacts_orig_list[[6]] %*% ASymptVectCOM
 
     # Calculate overall force of infection for agent i
-    exposed_prob <- 1 - exp(-beta*(SymptContVect + alpha*AsymptContVect))
+    exposed_prob <- 1 - exp(-(1-VE)*beta*(SymptContVect + alpha*AsymptContVect))
     # Determine if individual will be exposed
-    exposed <- rbinom(N, 1, p = exposed_prob@x)*as.numeric(state == "S")
+    exposed <- rbinom(N, 1, p = exposed_prob@x)*as.numeric(state == "S" | state == "V")
     
     # Option for stochastic infection obtained outside the community (one or two exposed people per day)
     outside <- 1+rbinom(n = 1, size = 1, prob = 0.5)
@@ -282,6 +293,7 @@ SEIRtest_func <- function(synth_pop_df, #synthetic population
                        fate, #Vector of pre-determined individual fates, if they got sick
                        state_full, #an N x day matrix of states
                        state, #a N x 1 vector of current state
+                       VE, #an N x 1 vector of the vaccine effectiveness ( = 0 if person is not vaccinated)
                        quarantine_cases, #a vector indicating whether cases are being quarantined on that day
                        propComplyCase, #proportion of cases that comply with quarantine intervention
                        propComplyHH, #proportion of household members that also isolate
@@ -471,9 +483,9 @@ SEIRtest_func <- function(synth_pop_df, #synthetic population
       contacts_orig_list[[6]] %*% ASymptVectCOM
     
     # Calculate overall force of infection for agent i
-    exposed_prob <- 1 - exp(-beta*(SymptContVect + alpha*AsymptContVect))
+    exposed_prob <- 1 - exp(-(1-VE)*beta*(SymptContVect + alpha*AsymptContVect))
     # Determine if individual will be exposed
-    exposed <- rbinom(N, 1, p = exposed_prob@x)*as.numeric(state == "S")
+    exposed <- rbinom(N, 1, p = exposed_prob@x)*as.numeric(state == "S" | state == "V")
     
     # Option for stochastic infection obtained outside the community (one or two exposed people per day)
     outside <- 1+rbinom(n = 1, size = 1, prob = 0.5)
