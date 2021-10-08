@@ -8,7 +8,7 @@
 #####################################################################################  
 
 ########################## 
-#Last modified: 8/22/2022#
+#Last modified: 9/30/2021#
 ########################## 
 
 #############################################################
@@ -21,7 +21,11 @@ alpha = 0.5 #ratio of asymptomatic to symptomatic transmission; set to 0.5 in ar
 susceptRatio = 1 #ratio of the susceptibility of children < (susceptAgeSplit) to SARS-CoV-2 vs. adults; varied between 0.5 and 1
 susceptAgeSplit = 10 #age where susceptibility differs; here, agents < 10 assumed half as susceptible 
 
-vacc_eff = 0.85 #vaccination effectiveness -- set to 0.85 in article
+#Vaccine effectiveness for various disease endpoints
+VE_any = 0.77 #Higdon
+VE_symp = 0.85 #Lopez Bernal, NEJM
+VE_sev = 0.93 #CDC MMWR
+
 vacc_prop = 0.50 #proportion of the population vaccinated -- Make 0 for no vacc situation
 
 R0_init = 5*0.844 + 2.5*(1-0.844) #basic reproduction number, weighted by which is Delta
@@ -29,8 +33,8 @@ R0_init = 5*0.844 + 2.5*(1-0.844) #basic reproduction number, weighted by which 
 ##Define waiting times -- parameters in a Weibull distribution
 #E --> I; I --> R or D; I --> H; H --> R or D
 shapeEI = 4; scaleEI = 6
-shapeIR = 7; scaleIR = 14
-shapeIH = 7; scaleIH = 11
+shapeIR = 7; scaleIR = 8
+shapeIH = 7; scaleIH = 7.8
 shapeHRD = 13; scaleHRD = 15
 
 # COMMUNITY TRANSMISSION PARAMETERS VARIED IN ANALYSES
@@ -89,6 +93,7 @@ outcomes <- foreach(reps = 1:1000, .packages = "dplyr") %dopar% {
   #Extract synetic population
   
   synth_pop_df <- synth_pop_list[[reps]]
+  synth_pop_df$Age <- as.numeric(as.character(synth_pop_df$Age))
   
   #Define number in each age group
   Age_Vect <- c(sum(synth_pop_df$AgeCat == "Under5"),
@@ -110,7 +115,7 @@ outcomes <- foreach(reps = 1:1000, .packages = "dplyr") %dopar% {
   rownames(AgeContRates) <- c("Under5", "5-10", "11-13", "14-17", "18-64", "65+")
   
   #define new age categories
-  synth_pop_df$Age <- as.numeric(as.character(synth_pop_df$Age))
+
   
   Age_Vect2 <- c(sum(synth_pop_df$AgeCat2 == 1),
                  sum(synth_pop_df$AgeCat2 == 2),
@@ -142,13 +147,27 @@ outcomes <- foreach(reps = 1:1000, .packages = "dplyr") %dopar% {
     rowSums(contacts_orig_list[[6]])
   MAXEIG <- weighted.mean(numCont, w = numCont)
  
+  state0 <- start_state_list[[reps]]
+  
+  #Re-allocate the vaccination within the start states to fit with initial parameters for vaccination...
+  # Create the vaccination vector -- who gets vaccinated and for whom is vaccination effective?
+  got_v <- rep(0,N)
+  got_v[synth_pop_df$Age < 12] <- 0
+  got_v[synth_pop_df$Age >= 12] <- rbinom(length(got_v[synth_pop_df$Age >= 12]), size = 1, prob = vacc_prop)
+    
+  state0[state0 == "V"] <- "S"
+  state0[state0 == "S" & got_v == 1] <- "V"
+  
+  VE <- got_v*VE_any # a vector to be multiplied by the FOI, will be 0 if not vaccinated, VE_any else
+  
   #Define conditional probabilities for clinical outcomes 
-  #rho: prob infection is clinical
+  #rho: prob infection is clinical given age and vaccine status
   rho = rep(0.69, N) #prob case is clinical for under 18 is 21%, 69% for those older...
   rho[synth_pop_df$AgeCat == "Under5" | synth_pop_df$AgeCat == "5-10" |
         synth_pop_df$AgeCat == "11-13"| synth_pop_df$AgeCat == "14-17"] <- 0.21
   
-  synth_pop_df$Age <- as.numeric(as.character(synth_pop_df$Age))
+  #update P(clin|age,vac) for those who are vaccinated
+  rho[got_v == 1] <- rho[got_v == 1] * ((1-VE_symp)/(1-VE_any))
   
   #Define conditional probability of hospitalization
   h_rate <- rep(NA, N) #hospitalization rates
@@ -163,6 +182,9 @@ outcomes <- foreach(reps = 1:1000, .packages = "dplyr") %dopar% {
   h_rate[synth_pop_df$Age >= 70 & synth_pop_df$Age < 80] <- 0.166
   h_rate[synth_pop_df$Age >= 80] <- 0.184
   
+  #update P(clin|age,vac) for thos who are vaccinated
+  h_rate[got_v == 1] <- h_rate[got_v == 1] * ((1-VE_sev)/(1-VE_symp))
+  
   #define conditional probability of death
   mu = rep(NA, N) #death rates, among those hospitalized
   #SOURCE: https://www.bmj.com/content/369/bmj.m1923
@@ -176,27 +198,12 @@ outcomes <- foreach(reps = 1:1000, .packages = "dplyr") %dopar% {
   mu[synth_pop_df$Age >= 70 & synth_pop_df$Age < 80] <- 0.238 #0.5*(0.363 + 0.238)
   mu[synth_pop_df$Age >= 80] <- 0.365#0.5*(0.365+0.538)
   
-  ##update fates for each agent
-  fate_i <- fate_list[[reps]]
-  
-  state0 <- start_state_list[[reps]]
-  
-  #Re-allocate the vaccination within the start states to fit with initial parameters for vaccination...
-  # Create the vaccination vector -- who gets vaccinated and for whom is vaccination effective?
-  got_v <- rep(0,N)
-  got_v[synth_pop_df$Age < 12] <- 0
-  got_v[synth_pop_df$Age >= 12] <- rbinom(length(got_v[synth_pop_df$Age >= 12]), size = 1, prob = vacc_prop)
-    
-  V <- rep(0, N)
-  V[synth_pop_df$Age < 12 & got_v == 0] <- 0
-  V[synth_pop_df$Age >= 12 & got_v == 1] <- rbinom(length(V[synth_pop_df$Age >= 12 & got_v == 1]), size = 1, prob = vacc_eff)
-
-  state0[state0 == "V"] <- "S"
-  state0[state0 == "S" & V == 1] <- "V"
+  fate_pre_vacc <- fate_list[[reps]]
   
   ##determine fates for each agent
-  wait_times <- update_fates(N, fate_i, state0, 
-                        synth_pop_df,
+  wait_times <- update_fates(N, state0,
+                       fate_pre_vacc,
+                       synth_pop_df,
                        R0_init, MAXEIG, 
                        alpha, susceptRatio, susceptAgeSplit,
                        shapeEI, scaleEI, 
@@ -206,7 +213,6 @@ outcomes <- foreach(reps = 1:1000, .packages = "dplyr") %dopar% {
                        rho, 
                        h_rate, 
                        mu)
-  
 
   ################## Reopening (Aug 9 - Dec 17) ##################
   ################## Sim1: Schools Fully Closed ############################
@@ -239,9 +245,10 @@ outcomes <- foreach(reps = 1:1000, .packages = "dplyr") %dopar% {
                                     time_state1 = wait_times[["time_state1"]], time_next_state1 = wait_times[["time_next_state1"]],
                                     time_state2 = wait_times[["time_state2"]], time_next_state2 = wait_times[["time_next_state2"]],
                                     time_state3 = wait_times[["time_state3"]], time_next_state3 = wait_times[["time_next_state3"]], 
-                                    fate = fate_i,
+                                    fate = wait_times[["fate_updated"]],
                                     state_full = state0,
                                     state = state0,
+                                    VE = VE,
                                     propComplyCase = 0.80*0.6, 
                                     propComplyHH = 0.25,
                                     redContacts = 0.75,
@@ -276,9 +283,10 @@ outcomes <- foreach(reps = 1:1000, .packages = "dplyr") %dopar% {
                                   time_state1 = wait_times[["time_state1"]], time_next_state1 = wait_times[["time_next_state1"]],
                                   time_state2 = wait_times[["time_state2"]], time_next_state2 = wait_times[["time_next_state2"]],
                                   time_state3 = wait_times[["time_state3"]], time_next_state3 = wait_times[["time_next_state3"]], 
-                                  fate = fate_i,
+                                  fate = wait_times[["fate_updated"]],
                                   state_full = state0,
                                   state = state0,
+                                  VE = VE,
                                   propComplyCase = 0.80*0.6, 
                                   propComplyHH = 0.25,
                                   redContacts = 0.75,
@@ -307,9 +315,10 @@ outcomes <- foreach(reps = 1:1000, .packages = "dplyr") %dopar% {
                                   time_state1 = wait_times[["time_state1"]], time_next_state1 = wait_times[["time_next_state1"]],
                                   time_state2 = wait_times[["time_state2"]], time_next_state2 = wait_times[["time_next_state2"]],
                                   time_state3 = wait_times[["time_state3"]], time_next_state3 = wait_times[["time_next_state3"]], 
-                                  fate = fate_i,
+                                  fate = wait_times[["fate_updated"]],
                                   state_full = state0,
                                   state = state0,
+                                  VE = VE,
                                   propComplyCase = 0.80*0.6, 
                                   propComplyHH = 0.25,
                                   redContacts = 0.75,
@@ -336,7 +345,7 @@ outcomes <- foreach(reps = 1:1000, .packages = "dplyr") %dopar% {
   S1_contact_list[[3]] <- 0.25*S1_contact_list[[3]] #reduce non-class contacts by 75%
   S1_contact_list[[4]] <- 0.25*S1_contact_list[[4]] #reduce non-class contacts by 75%
   S1_contact_list[[5]] <- (5/7 - 0.25*1/7 - 0.25*.2/7)/(5/7 - 1/7 - 0.2/7)*S1_contact_list[[5]]
-   S1_contact_list[[6]] <- gen_COMmat(Obs.comm_feb, Age_Vect2, synth_pop_df) #community, using survey rates
+  S1_contact_list[[6]] <- gen_COMmat(Obs.comm_feb, Age_Vect2, synth_pop_df) #community, using survey rates
   
   #Call SEIR function
   StatesPhase_MASK_COHORT <- SEIRQ_func(synth_pop_df, 
@@ -348,9 +357,10 @@ outcomes <- foreach(reps = 1:1000, .packages = "dplyr") %dopar% {
                                 time_state1 = wait_times[["time_state1"]], time_next_state1 = wait_times[["time_next_state1"]],
                                 time_state2 = wait_times[["time_state2"]], time_next_state2 = wait_times[["time_next_state2"]],
                                 time_state3 = wait_times[["time_state3"]], time_next_state3 = wait_times[["time_next_state3"]], 
-                                fate = fate_i,
+                                fate = wait_times[["fate_updated"]],
                                 state_full = state0,
                                 state = state0,
+                                VE = VE,
                                 propComplyCase = 0.80*0.6, 
                                 propComplyHH = 0.25,
                                 redContacts = 0.75,
@@ -382,9 +392,10 @@ outcomes <- foreach(reps = 1:1000, .packages = "dplyr") %dopar% {
                                     time_state1 = wait_times[["time_state1"]], time_next_state1 = wait_times[["time_next_state1"]],
                                     time_state2 = wait_times[["time_state2"]], time_next_state2 = wait_times[["time_next_state2"]],
                                     time_state3 = wait_times[["time_state3"]], time_next_state3 = wait_times[["time_next_state3"]], 
-                                    fate = fate_i,
+                                    fate = wait_times[["fate_updated"]],
                                     state_full = state0,
                                     state = state0,
+                                    VE = VE,
                                     propComplyCase = 0.80*0.6, 
                                     propComplyHH = 0.25,
                                     redContacts = 0.75,
@@ -410,7 +421,9 @@ outcomes <- foreach(reps = 1:1000, .packages = "dplyr") %dopar% {
                    "OPEN" = outcomeOPEN, 
                    "MASK" = outcomeMASK, 
                    "Int1" = outcomeS1,
-                   "TB7" = outcomeTB7) 
+                   "TB7" = outcomeTB7,
+                   "fate" = wait_times[["fate_updated"]],
+                   "got_v" = got_v) 
   outcomes
 }
 

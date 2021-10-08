@@ -6,7 +6,7 @@
 #####################################################################################  
 
 ########################## 
-#Last modified: 8/22/2022#
+#Last modified: 9/30/2021#
 ########################## 
 
 #############################################################
@@ -19,7 +19,12 @@ alpha = 0.5 #ratio of asymptomatic to symptomatic transmission; set to 0.5 in ar
 susceptRatio = 1 #ratio of the susceptibility of children < (susceptAgeSplit) to SARS-CoV-2 vs. adults; varied between 0.5 and 1
 susceptAgeSplit = 10 #age where susceptibility differs; here, agents < 10 assumed half as susceptible 
 
-vacc_eff = 0.85 #vaccination effectiveness 
+#Vaccine effectiveness for various disease endpoints
+VE_any = 0.77 #Higdon
+VE_symp = 0.85 #Lopez Bernal, NEJM
+VE_sev = 0.93 #CDC MMWR
+
+#Proportion vaccinated
 vacc_prop = 0.50 #proportion of the community vaccinated -- Make 0 for no vacc situation
 teach_vacc_prop = c(0.8, 0.9, 0.95) #proportion of teachers vaccinated 
 stud_vacc_prop = c(0.8, 0.9, 0.95) #proportion of students >12 vaccinated 
@@ -29,8 +34,8 @@ R0_init = 5*0.844 + 2.5*(1-0.844) #basic reproduction number, weighted by which 
 ##Define waiting times -- parameters in a Weibull distribution
 #E --> I; I --> R or D; I --> H; H --> R or D
 shapeEI = 4; scaleEI = 6
-shapeIR = 7; scaleIR = 14
-shapeIH = 7; scaleIH = 11
+shapeIR = 7; scaleIR = 8
+shapeIH = 7; scaleIH = 7.8
 shapeHRD = 13; scaleHRD = 15
 
 # COMMUNITY TRANSMISSION PARAMETERS VARIED IN ANALYSES
@@ -89,6 +94,7 @@ outcomes <- foreach(reps = 1:1000, .packages = "dplyr") %dopar% {
   #Generate synetic population
   
   synth_pop_df <- synth_pop_list[[reps]]
+  synth_pop_df$Age <- as.numeric(as.character(synth_pop_df$Age))
   
   #Define number in each age group
   Age_Vect <- c(sum(synth_pop_df$AgeCat == "Under5"),
@@ -110,8 +116,6 @@ outcomes <- foreach(reps = 1:1000, .packages = "dplyr") %dopar% {
   rownames(AgeContRates) <- c("Under5", "5-10", "11-13", "14-17", "18-64", "65+")
   
   #define new age categories
-  synth_pop_df$Age <- as.numeric(as.character(synth_pop_df$Age))
-  
   Age_Vect2 <- c(sum(synth_pop_df$AgeCat2 == 1),
                  sum(synth_pop_df$AgeCat2 == 2),
                  sum(synth_pop_df$AgeCat2 == 3),
@@ -142,13 +146,27 @@ outcomes <- foreach(reps = 1:1000, .packages = "dplyr") %dopar% {
     rowSums(contacts_orig_list[[6]])
   MAXEIG <- weighted.mean(numCont, w = numCont)
  
+  #Extract initial states for people
+  state0 <- start_state_list[[reps]]
+  
+  #Re-allocate the vaccination within the start states to fit with initial parameters for vaccination...
+  # Create the vaccination vector -- who gets vaccinated and for whom is vaccination effective?
+
+  CommV <- TeachV <- SchoolElg <- rep(0,N)
+  CommV[synth_pop_df$Age > 18 & is.na(synth_pop_df$School)] <- 1
+  TeachV[synth_pop_df$Age > 18 & !is.na(synth_pop_df$School)] <- 1
+  SchoolElg[synth_pop_df$Age >= 12 & synth_pop_df$Age <= 18 & !is.na(synth_pop_df$School)] <- 1
+  
+  ## First get some consistent things -- 1) community vaccination
+  
+  got_v <- rep(0,N)
+  got_v[CommV == 1] <- rbinom(length(got_v[CommV == 1]), size = 1, prob = vacc_prop)
+
   #Define conditional probabilities for clinical outcomes 
   #rho: prob infection is clinical
   rho = rep(0.69, N) #prob case is clinical for under 18 is 21%, 69% for those older...
   rho[synth_pop_df$AgeCat == "Under5" | synth_pop_df$AgeCat == "5-10" |
         synth_pop_df$AgeCat == "11-13"| synth_pop_df$AgeCat == "14-17"] <- 0.21
-  
-  synth_pop_df$Age <- as.numeric(as.character(synth_pop_df$Age))
   
   #Define conditional probability of hospitalization
   h_rate <- rep(NA, N) #hospitalization rates
@@ -176,25 +194,37 @@ outcomes <- foreach(reps = 1:1000, .packages = "dplyr") %dopar% {
   mu[synth_pop_df$Age >= 70 & synth_pop_df$Age < 80] <- 0.238 #0.5*(0.363 + 0.238)
   mu[synth_pop_df$Age >= 80] <- 0.365#0.5*(0.365+0.538)
   
-  ##update fates for each agent
-  fate_i <- fate_list[[reps]]
+  fate_pre_vacc <- fate_list[[reps]]
   
-  state0 <- start_state_list[[reps]]
+  #### Create the contact matrices for schools open vs closed ####
   
-  #Re-allocate the vaccination within the start states to fit with initial parameters for vaccination...
-  # Create the vaccination vector -- who gets vaccinated and for whom is vaccination effective?
-
-  CommV <- TeachV <- SchoolElg <- rep(0,N)
-  CommV[synth_pop_df$Age > 18 & is.na(synth_pop_df$School)] <- 1
-  TeachV[synth_pop_df$Age > 18 & !is.na(synth_pop_df$School)] <- 1
-  SchoolElg[synth_pop_df$Age >= 12 & synth_pop_df$Age <= 18 & !is.na(synth_pop_df$School)] <- 1
+  ##school is closed
+  CLOSED_contact_list <- contacts_orig_list
   
-  ## First get some consistent things -- 1) community vaccination
-  V <- rep(0, N)
-  V[CommV == 1] <- rbinom(length(V[CommV == 1]), size = 1, prob = vacc_eff*vacc_prop)
+  EWrk.cont.mid <- contacts_orig_list[[11]]
+  MidEssentialWorkMat <- matrix(0, ncol = N, nrow = N)
+  for (i in 1:dim(EWrk.cont.mid)[1]){
+    MidEssentialWorkMat[EWrk.cont.mid[i,1],EWrk.cont.mid[i,2]] <- 5/7
+    MidEssentialWorkMat[EWrk.cont.mid[i,2],EWrk.cont.mid[i,1]] <- 5/7
+  }
+  MidEssentialWorkMatsp <- as(MidEssentialWorkMat, "sparseMatrix")
+  rm(MidEssentialWorkMat)
   
-  state0[state0 == "V"] <- "S"
-  state0[state0 == "S" & V == 1] <- "V"
+  CLOSED_contact_list[[2]] <- MidEssentialWorkMatsp #Work
+  CLOSED_contact_list[[3]] <- 0*CLOSED_contact_list[[3]] #School
+  CLOSED_contact_list[[4]] <- 0*CLOSED_contact_list[[4]] #Grade
+  CLOSED_contact_list[[5]] <- 0*CLOSED_contact_list[[5]] #Class
+  CLOSED_contact_list[[6]] <- gen_COMmat(Obs.comm_feb, Age_Vect2, synth_pop_df) #Community, using survey data
+  
+  ##schools are open
+  
+  OPEN_contact_list <- contacts_orig_list
+  
+  OPEN_contact_list[[2]] <- MidEssentialWorkMatsp
+  #OPEN_contact_list[[6]] <- gen_COMmat(CommContactIncr*Obs.comm) #Community, EXACTLY as observed, with work, daycare, public trans included
+  OPEN_contact_list[[6]] <- gen_COMmat(Obs.comm_feb, Age_Vect2, synth_pop_df)
+  ####
+  
   
   #initialize storage lists for open and closed
   outcomeCLOSEDLists <- outcomeOPENLists <- list()
@@ -202,18 +232,28 @@ outcomes <- foreach(reps = 1:1000, .packages = "dplyr") %dopar% {
   for (vi in 1:length(stud_vacc_prop)){
     
     #reset the vaccination and initial state vectors
-    Vs <- V
+    got_vi <- got_v
     state0v<- state0
     
     #Update the vaccinated teachers and students
-    Vs[TeachV == 1] <- rbinom(length(Vs[TeachV == 1]), size = 1, prob = vacc_eff*teach_vacc_prop[vi])
-    Vs[SchoolElg == 1] <- rbinom(length(Vs[SchoolElg == 1]), size = 1, prob = vacc_eff*stud_vacc_prop[vi])
+    got_vi[TeachV == 1] <- rbinom(length(got_vi[TeachV == 1]), size = 1, prob = teach_vacc_prop[vi])
+    got_vi[SchoolElg == 1] <- rbinom(length(got_vi[SchoolElg == 1]), size = 1, prob = stud_vacc_prop[vi])
     
     #Overwrite some states as being vaccinated
-    state0v[Vs==1] <- "V"
+    state0v[state0v == "V"] <- "S"
+    state0v[got_vi==1 & state0v == "S"] <- "V"
+    
+    #update P(clin|age,vac) for thos who are vaccinated
+    rho[got_vi == 1] <- rho[got_vi == 1] * ((1-VE_symp)/(1-VE_any))
+    
+    #update P(clin|age,vac) for thos who are vaccinated
+    h_rate[got_vi == 1] <- h_rate[got_vi == 1] * ((1-VE_sev)/(1-VE_symp))
+    
+    VE <- got_vi*VE_any # a vector to be multiplied by the FOI, will be 0 if not vaccinated, VE_any else
     
     ##determine fates for each agent
-    wait_times <- update_fates(N, fate_i, state0v, 
+    wait_times <- update_fates(N, state0v,
+                               fate_pre_vacc,
                                synth_pop_df,
                                R0_init, MAXEIG, 
                                alpha, susceptRatio, susceptAgeSplit,
@@ -228,24 +268,6 @@ outcomes <- foreach(reps = 1:1000, .packages = "dplyr") %dopar% {
     ################## Reopening (Aug 9 - Dec 17) ##################
     ################## Sim1: Schools Fully Closed ############################
     
-    #Update contact matrices
-    CLOSED_contact_list <- contacts_orig_list
-    
-    EWrk.cont.mid <- contacts_orig_list[[11]]
-    MidEssentialWorkMat <- matrix(0, ncol = N, nrow = N)
-    for (i in 1:dim(EWrk.cont.mid)[1]){
-      MidEssentialWorkMat[EWrk.cont.mid[i,1],EWrk.cont.mid[i,2]] <- 5/7
-      MidEssentialWorkMat[EWrk.cont.mid[i,2],EWrk.cont.mid[i,1]] <- 5/7
-    }
-    MidEssentialWorkMatsp <- as(MidEssentialWorkMat, "sparseMatrix")
-    rm(MidEssentialWorkMat)
-    
-    CLOSED_contact_list[[2]] <- MidEssentialWorkMatsp #Work
-    CLOSED_contact_list[[3]] <- 0*CLOSED_contact_list[[3]] #School
-    CLOSED_contact_list[[4]] <- 0*CLOSED_contact_list[[4]] #Grade
-    CLOSED_contact_list[[5]] <- 0*CLOSED_contact_list[[5]] #Class
-     CLOSED_contact_list[[6]] <- gen_COMmat(Obs.comm_feb, Age_Vect2, synth_pop_df) #Community, using survey data
-    
     #Call SEIR function
     StatesPhase_CLOSED <- SEIRQ_func(synth_pop_df, 
                                       start_day = 1, #August 9
@@ -256,9 +278,10 @@ outcomes <- foreach(reps = 1:1000, .packages = "dplyr") %dopar% {
                                       time_state1 = wait_times[["time_state1"]], time_next_state1 = wait_times[["time_next_state1"]],
                                       time_state2 = wait_times[["time_state2"]], time_next_state2 = wait_times[["time_next_state2"]],
                                       time_state3 = wait_times[["time_state3"]], time_next_state3 = wait_times[["time_next_state3"]], 
-                                      fate = fate_i,
+                                      fate = wait_times[["fate_updated"]],
                                       state_full = state0v,
                                       state = state0v,
+                                      VE = VE,
                                       propComplyCase = 0.80*0.6, 
                                       propComplyHH = 0.25,
                                       redContacts = 0.75,
@@ -273,17 +296,11 @@ outcomes <- foreach(reps = 1:1000, .packages = "dplyr") %dopar% {
     outcomeCLOSED <- modelled_outcomes(state_full.CLOSED, synth_pop_df)
     
     rm(state_full.CLOSED);
-    rm(CLOSED_contact_list)
     gc()
     #####################################
   
     ################## Sim2: Opening schools fully!!! ############################
-    OPEN_contact_list <- contacts_orig_list
-    
-    OPEN_contact_list[[2]] <- MidEssentialWorkMatsp
-    #OPEN_contact_list[[6]] <- gen_COMmat(CommContactIncr*Obs.comm) #Community, EXACTLY as observed, with work, daycare, public trans included
-    OPEN_contact_list[[6]] <- gen_COMmat(Obs.comm_feb, Age_Vect2, synth_pop_df)
-    
+
     #Call SEIR function
     StatesPhase_OPEN <- SEIRQ_func(synth_pop_df, 
                                     start_day = 1, #Aug 9
@@ -294,9 +311,10 @@ outcomes <- foreach(reps = 1:1000, .packages = "dplyr") %dopar% {
                                     time_state1 = wait_times[["time_state1"]], time_next_state1 = wait_times[["time_next_state1"]],
                                     time_state2 = wait_times[["time_state2"]], time_next_state2 = wait_times[["time_next_state2"]],
                                     time_state3 = wait_times[["time_state3"]], time_next_state3 = wait_times[["time_next_state3"]], 
-                                    fate = fate_i,
+                                    fate = wait_times[["fate_updated"]],
                                     state_full = state0v,
                                     state = state0v,
+                                    VE = VE,
                                     propComplyCase = 0.80*0.6, 
                                     propComplyHH = 0.25,
                                     redContacts = 0.75,
@@ -320,15 +338,14 @@ outcomes <- foreach(reps = 1:1000, .packages = "dplyr") %dopar% {
     outcomeOPENLists[[vi]] <- append(outcomeOPENLists, outcomeOPEN)
   }
 
-  rm(OPEN_contact_list)
-  rm(CLOSED_contact_list)
-
   
   #########################################################################
   # Combine output
   
   outcomes <- list("CLOSED" = outcomeCLOSEDLists, 
-                   "OPEN" = outcomeOPENLists)
+                   "OPEN" = outcomeOPENLists,
+                   "fate" = wait_times[["fate_updated"]],
+                   "got_v" = got_vi)
   outcomes
 }
 
